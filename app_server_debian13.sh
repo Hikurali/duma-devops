@@ -1,96 +1,96 @@
 #!/usr/bin/env bash
-# Городская Дума — APP-SERVER bootstrap. Самодостаточный файл: исходники встроены ниже.
-# Debian 13 (Trixie) без GUI, приложение без Docker, systemd + FastAPI + PostgreSQL на второй ВМ.
+# APP-SERVER: самодостаточный установщик "Городская Дума" для Debian 13.
+# Запуск: sudo bash app_server_debian13_onefile.sh
+# Предусловия: DB-SERVER=192.168.56.20:5432 уже настроен,
+#              APP-SERVER имеет адрес 192.168.56.10/24.
+# Проверка перед запуском: bash app_server_debian13_onefile.sh --verify
 set -Eeuo pipefail
 
-APP_IP="${APP_IP:-192.168.56.10}"
-DB_IP="${DB_IP:-192.168.56.20}"
-HOSTONLY_IF="${HOSTONLY_IF:-enp0s8}"
-TARGET="/opt/gorod-duma"
-ENV_DIR="/etc/gorod-duma"
-ENV_FILE="$ENV_DIR/app.env"
-SERVICE="/etc/systemd/system/gorod-duma.service"
-log() { echo -e "\n[APP-SERVER] $*"; }
-fail() { echo "[ОШИБКА] $*" >&2; exit 1; }
-trap 'echo "[APP-SERVER] Сбой на строке $LINENO. Посмотрите сообщение выше и journalctl." >&2' ERR
-[[ $EUID -eq 0 ]] || fail "Запусти с sudo: sudo bash app_server_debian13.sh"
-. /etc/os-release
-[[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] || fail "Нужен Debian 13 (Trixie), обнаружено: ${PRETTY_NAME:-неизвестная ОС}"
-[[ "$DB_IP" =~ ^[0-9.]+$ && "$APP_IP" =~ ^[0-9.]+$ ]] || fail "Неверный IPv4"
-if [[ -f "$TARGET/.installed_by_duma_script" && "${REINSTALL:-0}" != "1" ]]; then
-  fail "Проект уже установлен. Чтобы не затереть твои изменения, остановился. Проверка: sudo systemctl status gorod-duma. Для явной переустановки: sudo REINSTALL=1 bash app_server.sh"
-fi
+ARCHIVE_SHA256="07228e5ebcb0c1ff94c48a1d90e87c03229a2b47b04acb211d132946453bbed8"
+WORKDIR="$(mktemp -d /tmp/gorod-duma-app.XXXXXXXX)"
+cleanup() { rm -rf -- "$WORKDIR"; }
+trap cleanup EXIT
+trap 'printf "Ошибка установки на строке %s\n" "$LINENO" >&2' ERR
 
-ensure_hostonly() {
-  command -v ip >/dev/null 2>&1 || fail "Не найдена команда ip; на Debian 13 необходим пакет iproute2"
-  ip link show "$HOSTONLY_IF" >/dev/null 2>&1 || fail "Не найден интерфейс $HOSTONLY_IF. Проверь адаптер Host-only через 'ip -br a' и передай HOSTONLY_IF=имя."
-
-  local this_ip="${THIS_IP}" current_conf
-  # Конфликтующий адрес нельзя бездумно перезаписывать: это может оборвать SSH.
-  current_conf=$(ip -o -4 addr show dev "$HOSTONLY_IF" | awk '{print $4}')
-  if [[ -n "$current_conf" && "$current_conf" != "${this_ip}/24" ]]; then
-    ip -br -4 addr show dev "$HOSTONLY_IF"
-    fail "На $HOSTONLY_IF уже стоит другой IP ($current_conf). Нужен ${this_ip}/24; сначала проверь DHCP Host-only или настройки этой ВМ."
-  fi
-
-  if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null 2>&1; then
-    if nmcli -g GENERAL.STATE device show "$HOSTONLY_IF" 2>/dev/null | grep -qE '^100'; then
-      if [[ "$current_conf" == "${this_ip}/24" ]]; then
-        log "Интерфейс $HOSTONLY_IF уже настроен NetworkManager: $current_conf"
-        return
-      fi
-      fail "NetworkManager управляет $HOSTONLY_IF. Назначь ${this_ip}/24 через nmcli; скрипт не будет перезаписывать профиль NM."
-    fi
-  fi
-
-  # Если IP уже правильно настроен — не трогаем чужую сетевую конфигурацию.
-  if [[ "$current_conf" == "${this_ip}/24" ]]; then
-    log "Host-only интерфейс $HOSTONLY_IF уже имеет ${this_ip}/24 — оставляю существующую настройку"
-    return
-  fi
-
-  # Debian 13 без GUI: системные сети могут обслуживаться systemd-networkd либо ifupdown.
-  if systemctl is-active --quiet systemd-networkd; then
-    log "Настраиваю Host-only через systemd-networkd, не трогая NAT"
-    mkdir -p /etc/systemd/network
-    local config="/etc/systemd/network/05-gorod-duma-${HOSTONLY_IF}.network"
-    [[ ! -e "$config" ]] || cp -a "$config" "${config}.backup-gorod-duma"
-    cat > "$config" <<NETWORK
-[Match]
-Name=${HOSTONLY_IF}
-
-[Network]
-Address=${this_ip}/24
-LinkLocalAddressing=no
-NETWORK
-    chmod 644 "$config"
-    networkctl reload
-    networkctl reconfigure "$HOSTONLY_IF" || true
-  elif command -v ifup >/dev/null 2>&1 && [[ -f /etc/network/interfaces ]]; then
-    # Не допускаем дублирования интерфейса в конфигурации ifupdown.
-    if { grep -Eq "^[[:space:]]*iface[[:space:]]+${HOSTONLY_IF}[[:space:]]" /etc/network/interfaces \
-       || { [[ -d /etc/network/interfaces.d ]] && grep -hREq "^[[:space:]]*iface[[:space:]]+${HOSTONLY_IF}[[:space:]]" /etc/network/interfaces.d/; }; }; then
-      fail "В ifupdown уже описан $HOSTONLY_IF, но IP не поднят. Проверь /etc/network/interfaces и /etc/network/interfaces.d/."
-    fi
-    log "Настраиваю Host-only через Debian ifupdown, не трогая NAT"
-    cp -a /etc/network/interfaces /etc/network/interfaces.backup-gorod-duma
-    # Записываем в основной файл: Debian может не подключать interfaces.d автоматически.
-    cat >> /etc/network/interfaces <<NETWORK
-
-# BEGIN GOROD-DUMA HOST-ONLY
-# Выделенный интерфейс VirtualBox Host-only (без gateway и DNS)
-auto ${HOSTONLY_IF}
-iface ${HOSTONLY_IF} inet static
-    address ${this_ip}/24
-# END GOROD-DUMA HOST-ONLY
-NETWORK
-  else
-    # Если ifupdown не установлен, используем networkd только на Host-only интерфейсе.
-    if systemctl is-active --quiet NetworkManager; then
-      fail "Активен NetworkManager, сеть не изменена. Настрой ${this_ip}/24 на $HOSTONLY_IF вручную."
-    fi
-    log "Настраиваю systemd-networkd только для Host-only ($HOSTONLY_IF)"
-    mkdir -p /etc/systemd/network
-    cat > "/etc/systemd/network/05-gorod-duma-${HOSTONLY_IF}.network" <<NETWORK
-[Match]
-Name=${HOSTONLY_IF}
+# Встроенный архив содержит исходники FastAPI, веб-интерфейс, тесты и документацию.
+base64 --decode > "$WORKDIR/app.tar.gz" <<'DUMA_ARCHIVE_END'
+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
