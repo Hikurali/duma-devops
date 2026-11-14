@@ -1,96 +1,72 @@
 #!/usr/bin/env bash
-# Городская Дума — DB-SERVER bootstrap. Debian 13 (Trixie), без Docker.
+# Городская Дума — PostgreSQL для Debian 13, DB-SERVER без Docker.
+# Предполагается, что Host-only IP уже настроен в /etc/network/interfaces.
 set -Eeuo pipefail
+trap 'echo "ОШИБКА: установка остановлена на строке $LINENO" >&2' ERR
 
 DB_IP="${DB_IP:-192.168.56.20}"
 APP_IP="${APP_IP:-192.168.56.10}"
-HOSTONLY_IF="${HOSTONLY_IF:-enp0s8}"
-DB_NAME="gorod_duma"
-DB_USER="duma_app"
-CREDS="/root/gorod-duma-db-credentials.txt"
+NET_IF="${HOSTONLY_IF:-enp0s8}"
+DB_NAME=gorod_duma
+DB_USER=duma_app
+SECRETS=/root/gorod-duma-db-credentials.txt
 
-fail() { echo "[ОШИБКА] $*" >&2; exit 1; }
-log() { echo -e "\n[DB-SERVER] $*"; }
-trap 'echo "[DB-SERVER] Сбой на строке $LINENO. Посмотрите сообщение выше." >&2' ERR
-
-[[ $EUID -eq 0 ]] || fail "Запусти с sudo: sudo bash db_server_debian13.sh"
-[[ -r /etc/os-release ]] || fail "Нет /etc/os-release"
+[[ "$(id -u)" == 0 ]] || { echo 'Запусти: sudo bash db_server_debian13_fixed.sh' >&2; exit 1; }
 . /etc/os-release
-[[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] || fail "Нужен Debian 13 (Trixie), обнаружено: ${PRETTY_NAME:-неизвестная ОС}"
-[[ "$DB_IP" =~ ^[0-9.]+$ && "$APP_IP" =~ ^[0-9.]+$ ]] || fail "IP должен быть IPv4 адресом"
+[[ "${ID:-}" == debian && "${VERSION_ID:-}" == 13 ]] || { echo 'Этот файл только для Debian 13' >&2; exit 1; }
+if ! ip -4 -o addr show dev "$NET_IF" 2>/dev/null | grep -Fq "${DB_IP}/24"; then
+  echo "На $NET_IF нет адреса ${DB_IP}/24. Сначала проверь: ip -br a" >&2
+  exit 1
+fi
 
-ensure_hostonly() {
-  command -v ip >/dev/null 2>&1 || fail "Не найдена команда ip; на Debian 13 необходим пакет iproute2"
-  ip link show "$HOSTONLY_IF" >/dev/null 2>&1 || fail "Не найден интерфейс $HOSTONLY_IF. Проверь адаптер Host-only через 'ip -br a' и передай HOSTONLY_IF=имя."
+echo '[1/5] Установка PostgreSQL...'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y postgresql postgresql-client openssl
+systemctl enable --now postgresql
 
-  local this_ip="${THIS_IP}" current_conf
-  # Конфликтующий адрес нельзя бездумно перезаписывать: это может оборвать SSH.
-  current_conf=$(ip -o -4 addr show dev "$HOSTONLY_IF" | awk '{print $4}')
-  if [[ -n "$current_conf" && "$current_conf" != "${this_ip}/24" ]]; then
-    ip -br -4 addr show dev "$HOSTONLY_IF"
-    fail "На $HOSTONLY_IF уже стоит другой IP ($current_conf). Нужен ${this_ip}/24; сначала проверь DHCP Host-only или настройки этой ВМ."
-  fi
+echo '[2/5] Подготовка учётных данных...'
+if [[ -f "$SECRETS" ]]; then
+  DB_PASSWORD="$(sed -n 's/^DB_PASSWORD=//p' "$SECRETS" | head -n 1)"
+  [[ "$DB_PASSWORD" =~ ^[a-f0-9]{48}$ ]] || { echo 'Некорректный сохранённый пароль БД' >&2; exit 1; }
+else
+  DB_PASSWORD="$(openssl rand -hex 24)"
+  (umask 077; printf 'DB_HOST=%s\nDB_PORT=5432\nDB_NAME=%s\nDB_USER=%s\nDB_PASSWORD=%s\n' \
+    "$DB_IP" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" > "$SECRETS")
+fi
 
-  if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null 2>&1; then
-    if nmcli -g GENERAL.STATE device show "$HOSTONLY_IF" 2>/dev/null | grep -qE '^100'; then
-      if [[ "$current_conf" == "${this_ip}/24" ]]; then
-        log "Интерфейс $HOSTONLY_IF уже настроен NetworkManager: $current_conf"
-        return
-      fi
-      fail "NetworkManager управляет $HOSTONLY_IF. Назначь ${this_ip}/24 через nmcli; скрипт не будет перезаписывать профиль NM."
-    fi
-  fi
+echo '[3/5] Создание роли и базы данных...'
+if [[ "$(runuser -u postgres -- psql -XAtqc "SELECT count(*) FROM pg_roles WHERE rolname='${DB_USER}'")" == 0 ]]; then
+  runuser -u postgres -- psql -Xv ON_ERROR_STOP=1 -c "CREATE ROLE ${DB_USER} LOGIN"
+fi
+printf "SET password_encryption='scram-sha-256'; ALTER ROLE %s LOGIN PASSWORD '%s';\n" \
+  "$DB_USER" "$DB_PASSWORD" | runuser -u postgres -- psql -Xv ON_ERROR_STOP=1
+if [[ "$(runuser -u postgres -- psql -XAtqc "SELECT count(*) FROM pg_database WHERE datname='${DB_NAME}'")" == 0 ]]; then
+  runuser -u postgres -- createdb --owner="$DB_USER" "$DB_NAME"
+fi
+runuser -u postgres -- psql -Xv ON_ERROR_STOP=1 -c "ALTER DATABASE ${DB_NAME} OWNER TO ${DB_USER}"
 
-  # Если IP уже правильно настроен — не трогаем чужую сетевую конфигурацию.
-  if [[ "$current_conf" == "${this_ip}/24" ]]; then
-    log "Host-only интерфейс $HOSTONLY_IF уже имеет ${this_ip}/24 — оставляю существующую настройку"
-    return
-  fi
+echo '[4/5] Разрешение подключений только с APP-SERVER...'
+runuser -u postgres -- psql -Xv ON_ERROR_STOP=1 -c \
+  "ALTER SYSTEM SET listen_addresses TO 'localhost,${DB_IP}'"
+HBA="$(runuser -u postgres -- psql -XAtqc 'SHOW hba_file')"
+[[ -f "$HBA" ]] || { echo "Не найден pg_hba.conf: $HBA" >&2; exit 1; }
+if ! grep -Fq '# BEGIN GOROD-DUMA' "$HBA"; then
+  cp -a "$HBA" "${HBA}.backup-gorod-duma"
+else
+  sed -i '/# BEGIN GOROD-DUMA/,/# END GOROD-DUMA/d' "$HBA"
+fi
+printf '\n# BEGIN GOROD-DUMA\nhost    %s    %s    %s/32    scram-sha-256\n# END GOROD-DUMA\n' \
+  "$DB_NAME" "$DB_USER" "$APP_IP" >> "$HBA"
 
-  # Debian 13 без GUI: системные сети могут обслуживаться systemd-networkd либо ifupdown.
-  if systemctl is-active --quiet systemd-networkd; then
-    log "Настраиваю Host-only через systemd-networkd, не трогая NAT"
-    mkdir -p /etc/systemd/network
-    local config="/etc/systemd/network/05-gorod-duma-${HOSTONLY_IF}.network"
-    [[ ! -e "$config" ]] || cp -a "$config" "${config}.backup-gorod-duma"
-    cat > "$config" <<NETWORK
-[Match]
-Name=${HOSTONLY_IF}
+printf '[5/5] Перезапуск PostgreSQL и проверка...\n'
+systemctl restart postgresql
+pg_isready -h "$DB_IP" -p 5432
 
-[Network]
-Address=${this_ip}/24
-LinkLocalAddressing=no
-NETWORK
-    chmod 644 "$config"
-    networkctl reload
-    networkctl reconfigure "$HOSTONLY_IF" || true
-  elif command -v ifup >/dev/null 2>&1 && [[ -f /etc/network/interfaces ]]; then
-    # Не допускаем дублирования интерфейса в конфигурации ifupdown.
-    if { grep -Eq "^[[:space:]]*iface[[:space:]]+${HOSTONLY_IF}[[:space:]]" /etc/network/interfaces \
-       || { [[ -d /etc/network/interfaces.d ]] && grep -hREq "^[[:space:]]*iface[[:space:]]+${HOSTONLY_IF}[[:space:]]" /etc/network/interfaces.d/; }; }; then
-      fail "В ifupdown уже описан $HOSTONLY_IF, но IP не поднят. Проверь /etc/network/interfaces и /etc/network/interfaces.d/."
-    fi
-    log "Настраиваю Host-only через Debian ifupdown, не трогая NAT"
-    cp -a /etc/network/interfaces /etc/network/interfaces.backup-gorod-duma
-    # Записываем в основной файл: Debian может не подключать interfaces.d автоматически.
-    cat >> /etc/network/interfaces <<NETWORK
-
-# BEGIN GOROD-DUMA HOST-ONLY
-# Выделенный интерфейс VirtualBox Host-only (без gateway и DNS)
-auto ${HOSTONLY_IF}
-iface ${HOSTONLY_IF} inet static
-    address ${this_ip}/24
-# END GOROD-DUMA HOST-ONLY
-NETWORK
-  else
-    # Если ifupdown не установлен, используем networkd только на Host-only интерфейсе.
-    if systemctl is-active --quiet NetworkManager; then
-      fail "Активен NetworkManager, сеть не изменена. Настрой ${this_ip}/24 на $HOSTONLY_IF вручную."
-    fi
-    log "Настраиваю systemd-networkd только для Host-only ($HOSTONLY_IF)"
-    mkdir -p /etc/systemd/network
-    cat > "/etc/systemd/network/05-gorod-duma-${HOSTONLY_IF}.network" <<NETWORK
-[Match]
-Name=${HOSTONLY_IF}
-
-[Network]
+echo '============================================='
+echo "Готово: DB-SERVER ${DB_IP}:5432"
+echo "База: ${DB_NAME}; пользователь: ${DB_USER}"
+echo "Пароль: ${DB_PASSWORD}"
+echo "Дубликат пароля: ${SECRETS} (доступен только root)"
+echo 'Следующий шаг: установить приложение на APP-SERVER.'
+echo '============================================='
