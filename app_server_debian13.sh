@@ -1,96 +1,668 @@
+
 #!/usr/bin/env bash
-# APP-SERVER: самодостаточный установщик "Городская Дума" для Debian 13.
-# Запуск: sudo bash app_server_debian13_onefile.sh
-# Предусловия: DB-SERVER=192.168.56.20:5432 уже настроен,
-#              APP-SERVER имеет адрес 192.168.56.10/24.
-# Проверка перед запуском: bash app_server_debian13_onefile.sh --verify
 set -Eeuo pipefail
 
-ARCHIVE_SHA256="07228e5ebcb0c1ff94c48a1d90e87c03229a2b47b04acb211d132946453bbed8"
-WORKDIR="$(mktemp -d /tmp/gorod-duma-app.XXXXXXXX)"
-cleanup() { rm -rf -- "$WORKDIR"; }
-trap cleanup EXIT
-trap 'printf "Ошибка установки на строке %s\n" "$LINENO" >&2' ERR
+trap 'echo "Ошибка установки, строка $LINENO" >&2' ERR
 
-# Встроенный архив содержит исходники FastAPI, веб-интерфейс, тесты и документацию.
-base64 --decode > "$WORKDIR/app.tar.gz" <<'DUMA_ARCHIVE_END'
-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
+if [[ "$EUID" -ne 0 ]]; then
+    echo "Запусти через sudo bash app.sh"
+    exit 1
+fi
+
+. /etc/os-release
+if [[ "$ID" != "debian" || "$VERSION_ID" != "13" ]]; then
+    echo "Требуется Debian 13"
+    exit 1
+fi
+
+DB_HOST="192.168.56.20"
+DB_PORT="5432"
+DB_NAME="gorod_duma"
+DB_USER="duma_app"
+
+read -rsp "Пароль PostgreSQL duma_app: " DB_PASS
+echo
+read -rsp "Новый пароль администратора сайта: " ADMIN_PASS
+echo
+
+if [[ ${#ADMIN_PASS} -lt 10 ]]; then
+    echo "Пароль администратора должен содержать минимум 10 символов"
+    exit 1
+fi
+
+echo "[1/6] Установка пакетов..."
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y \
+    python3 python3-venv python3-pip \
+    postgresql-client openssl ca-certificates curl
+
+echo "[2/6] Проверка подключения к DB-SERVER..."
+
+if ! PGPASSWORD="$DB_PASS" psql \
+    -h "$DB_HOST" -p "$DB_PORT" \
+    -U "$DB_USER" -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 -Atqc "SELECT 1" | grep -qx 1; then
+    echo "Не удалось подключиться к PostgreSQL"
+    exit 1
+fi
+
+echo "[3/6] Создание приложения..."
+
+id dumaapp &>/dev/null || \
+    useradd --system --shell /usr/sbin/nologin dumaapp
+
+mkdir -p /opt/gorod-duma
+
+cat > /opt/gorod-duma/main.py <<'PYTHON_APP'
+import os
+import hmac
+import hashlib
+import logging
+from datetime import date
+from contextlib import asynccontextmanager
+
+import psycopg
+from psycopg.rows import dict_row
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("gorod-duma")
+security = HTTPBasic()
+
+
+def connect():
+    return psycopg.connect(
+        host=os.environ["DB_HOST"],
+        port=5432,
+        dbname="gorod_duma",
+        user="duma_app",
+        password=os.environ["DB_PASSWORD"],
+        connect_timeout=5,
+        row_factory=dict_row
+    )
+
+
+def init_db():
+    queries = [
+        """CREATE TABLE IF NOT EXISTS deputies (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            district TEXT NOT NULL DEFAULT ''
+        )""",
+        """CREATE TABLE IF NOT EXISTS commissions (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            chair_id INTEGER REFERENCES deputies(id)
+                ON DELETE SET NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS memberships (
+            commission_id INTEGER REFERENCES commissions(id)
+                ON DELETE CASCADE,
+            deputy_id INTEGER REFERENCES deputies(id)
+                ON DELETE CASCADE,
+            PRIMARY KEY (commission_id, deputy_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS meetings (
+            id SERIAL PRIMARY KEY,
+            commission_id INTEGER NOT NULL
+                REFERENCES commissions(id) ON DELETE CASCADE,
+            held_on DATE NOT NULL,
+            topic TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS attendance (
+            meeting_id INTEGER REFERENCES meetings(id)
+                ON DELETE CASCADE,
+            deputy_id INTEGER REFERENCES deputies(id)
+                ON DELETE CASCADE,
+            present BOOLEAN NOT NULL,
+            PRIMARY KEY (meeting_id, deputy_id)
+        )"""
+    ]
+    with connect() as conn:
+        for query in queries:
+            conn.execute(query)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    log.info("Database initialized")
+    yield
+
+
+app = FastAPI(
+    title="Городская Дума",
+    version="0.1.0",
+    lifespan=lifespan
+)
+
+
+def authorize(c: HTTPBasicCredentials = Depends(security)):
+    expected = os.environ["ADMIN_HASH"]
+    salt = bytes.fromhex(os.environ["ADMIN_SALT"])
+    actual = hashlib.pbkdf2_hmac(
+        "sha256", c.password.encode(), salt, 260000
+    ).hex()
+
+    if not (
+        hmac.compare_digest(c.username, "admin")
+        and hmac.compare_digest(actual, expected)
+    ):
+        raise HTTPException(
+            401,
+            "Неверный логин или пароль",
+            headers={"WWW-Authenticate": "Basic"}
+        )
+    return c.username
+
+
+def query(sql, params=(), mode="all"):
+    try:
+        with connect() as conn:
+            result = conn.execute(sql, params)
+            if mode == "one":
+                return result.fetchone()
+            if mode == "all":
+                return result.fetchall()
+    except (
+        psycopg.errors.UniqueViolation,
+        psycopg.errors.ForeignKeyViolation
+    ):
+        log.warning("Database integrity violation")
+        raise HTTPException(409, "Нарушена связь или уникальность данных")
+
+
+def require(sql, params=()):
+    if not query(sql, params, "one"):
+        raise HTTPException(404, "Запись не найдена")
+
+
+class Deputy(BaseModel):
+    name: str = Field(min_length=2)
+    district: str = ""
+
+
+class Commission(BaseModel):
+    name: str = Field(min_length=2)
+
+
+class Member(BaseModel):
+    deputy_id: int = Field(gt=0)
+
+
+class Meeting(BaseModel):
+    commission_id: int = Field(gt=0)
+    held_on: date
+    topic: str = Field(min_length=2)
+
+
+class Attendance(BaseModel):
+    deputy_id: int = Field(gt=0)
+    present: bool
+
+
+@app.get("/healthz")
+def health():
+    try:
+        with connect() as conn:
+            conn.execute("SELECT 1")
+        return {"status": "ok", "database": "ok"}
+    except Exception:
+        log.exception("Healthcheck failed")
+        raise HTTPException(503, "Database unavailable")
+
+
+@app.get("/api/deputies", dependencies=[Depends(authorize)])
+def list_deputies():
+    return query("SELECT * FROM deputies ORDER BY id")
+
+
+@app.post("/api/deputies", dependencies=[Depends(authorize)])
+def create_deputy(d: Deputy):
+    return query(
+        "INSERT INTO deputies(name,district) VALUES(%s,%s) RETURNING *",
+        (d.name, d.district),
+        "one"
+    )
+
+
+@app.put("/api/deputies/{id}", dependencies=[Depends(authorize)])
+def update_deputy(id: int, d: Deputy):
+    require("SELECT id FROM deputies WHERE id=%s", (id,))
+    return query(
+        "UPDATE deputies SET name=%s,district=%s WHERE id=%s RETURNING *",
+        (d.name, d.district, id),
+        "one"
+    )
+
+
+@app.delete("/api/deputies/{id}", dependencies=[Depends(authorize)])
+def delete_deputy(id: int):
+    require("SELECT id FROM deputies WHERE id=%s", (id,))
+    query("DELETE FROM deputies WHERE id=%s", (id,), None)
+    return {"deleted": id}
+
+
+@app.get("/api/commissions", dependencies=[Depends(authorize)])
+def list_commissions():
+    return query("SELECT * FROM commissions ORDER BY id")
+
+
+@app.post("/api/commissions", dependencies=[Depends(authorize)])
+def create_commission(c: Commission):
+    return query(
+        "INSERT INTO commissions(name) VALUES(%s) RETURNING *",
+        (c.name,),
+        "one"
+    )
+
+
+@app.put("/api/commissions/{id}", dependencies=[Depends(authorize)])
+def update_commission(id: int, c: Commission):
+    require("SELECT id FROM commissions WHERE id=%s", (id,))
+    return query(
+        "UPDATE commissions SET name=%s WHERE id=%s RETURNING *",
+        (c.name, id),
+        "one"
+    )
+
+
+@app.delete("/api/commissions/{id}", dependencies=[Depends(authorize)])
+def delete_commission(id: int):
+    require("SELECT id FROM commissions WHERE id=%s", (id,))
+    query("DELETE FROM commissions WHERE id=%s", (id,), None)
+    return {"deleted": id}
+
+
+@app.post("/api/commissions/{id}/members",
+          dependencies=[Depends(authorize)])
+def add_member(id: int, m: Member):
+    require("SELECT id FROM commissions WHERE id=%s", (id,))
+    require("SELECT id FROM deputies WHERE id=%s", (m.deputy_id,))
+    query(
+        "INSERT INTO memberships VALUES(%s,%s) ON CONFLICT DO NOTHING",
+        (id, m.deputy_id),
+        None
+    )
+    return {"commission_id": id, "deputy_id": m.deputy_id}
+
+
+@app.patch("/api/commissions/{id}/chair",
+           dependencies=[Depends(authorize)])
+def set_chair(id: int, m: Member):
+    require(
+        "SELECT 1 FROM memberships "
+        "WHERE commission_id=%s AND deputy_id=%s",
+        (id, m.deputy_id)
+    )
+    return query(
+        "UPDATE commissions SET chair_id=%s WHERE id=%s RETURNING *",
+        (m.deputy_id, id),
+        "one"
+    )
+
+
+@app.get("/api/meetings", dependencies=[Depends(authorize)])
+def list_meetings():
+    return query("SELECT * FROM meetings ORDER BY held_on DESC, id DESC")
+
+
+@app.post("/api/meetings", dependencies=[Depends(authorize)])
+def create_meeting(m: Meeting):
+    require(
+        "SELECT id FROM commissions WHERE id=%s",
+        (m.commission_id,)
+    )
+    return query(
+        "INSERT INTO meetings(commission_id,held_on,topic) "
+        "VALUES(%s,%s,%s) RETURNING *",
+        (m.commission_id, m.held_on, m.topic),
+        "one"
+    )
+
+
+@app.delete("/api/meetings/{id}", dependencies=[Depends(authorize)])
+def delete_meeting(id: int):
+    require("SELECT id FROM meetings WHERE id=%s", (id,))
+    query("DELETE FROM meetings WHERE id=%s", (id,), None)
+    return {"deleted": id}
+
+
+@app.post("/api/meetings/{id}/attendance",
+          dependencies=[Depends(authorize)])
+def mark_attendance(id: int, a: Attendance):
+    require(
+        "SELECT 1 FROM meetings t "
+        "JOIN memberships m ON m.commission_id=t.commission_id "
+        "WHERE t.id=%s AND m.deputy_id=%s",
+        (id, a.deputy_id)
+    )
+    query(
+        "INSERT INTO attendance VALUES(%s,%s,%s) "
+        "ON CONFLICT(meeting_id,deputy_id) "
+        "DO UPDATE SET present=EXCLUDED.present",
+        (id, a.deputy_id, a.present),
+        None
+    )
+    return {"meeting_id": id, "deputy_id": a.deputy_id}
+
+
+@app.get("/api/report", dependencies=[Depends(authorize)])
+def report(start: date, end: date):
+    if start > end:
+        raise HTTPException(422, "Некорректный период")
+
+    return query(
+        """SELECT d.id,d.name,
+        COUNT(t.id) AS recorded,
+        COUNT(t.id) FILTER(WHERE a.present) AS attended
+        FROM deputies d
+        LEFT JOIN attendance a ON a.deputy_id=d.id
+        LEFT JOIN meetings t ON t.id=a.meeting_id
+            AND t.held_on BETWEEN %s AND %s
+        GROUP BY d.id,d.name ORDER BY d.id""",
+        (start, end)
+    )
+
+
+HTML = """
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Городская Дума</title>
+<style>
+body {
+    font-family: Arial;
+    max-width: 1000px;
+    margin: 30px auto;
+    background: #f3f6fa;
+}
+section {
+    background: white;
+    padding: 20px;
+    margin: 15px 0;
+    border-radius: 10px;
+}
+input, button, select {
+    padding: 9px;
+    margin: 5px;
+}
+button {
+    background: #245edb;
+    color: white;
+    border: 0;
+    cursor: pointer;
+}
+pre {
+    background: #edf1f7;
+    padding: 10px;
+    overflow: auto;
+}
+</style>
+</head>
+<body>
+<h1>Городская Дума</h1>
+<p>Система управления депутатами, комиссиями и заседаниями</p>
+<p><a href="/docs">Документация HTTP API</a></p>
+
+<section>
+<h2>Авторизация</h2>
+<input id="username" value="admin" placeholder="Логин">
+<input id="password" type="password" placeholder="Пароль">
+<button onclick="load()">Войти</button>
+<p id="message"></p>
+</section>
+
+<section>
+<h2>Депутаты</h2>
+<input id="deputy_name" placeholder="ФИО">
+<input id="district" placeholder="Округ">
+<button onclick="addDeputy()">Добавить депутата</button>
+<pre id="deputies"></pre>
+</section>
+
+<section>
+<h2>Комиссии</h2>
+<input id="commission_name" placeholder="Название">
+<button onclick="addCommission()">Добавить комиссию</button>
+<pre id="commissions"></pre>
+</section>
+
+<section>
+<h2>Состав комиссии</h2>
+<input id="commission_id" type="number" placeholder="ID комиссии">
+<input id="member_id" type="number" placeholder="ID депутата">
+<button onclick="addMember()">Включить депутата</button>
+<button onclick="setChair()">Назначить председателем</button>
+</section>
+
+<section>
+<h2>Заседания</h2>
+<input id="meeting_commission" type="number" placeholder="ID комиссии">
+<input id="meeting_date" type="date">
+<input id="meeting_topic" placeholder="Тема">
+<button onclick="addMeeting()">Создать заседание</button>
+<pre id="meetings"></pre>
+</section>
+
+<section>
+<h2>Посещаемость</h2>
+<input id="meeting_id" type="number" placeholder="ID заседания">
+<input id="attendee_id" type="number" placeholder="ID депутата">
+<select id="present">
+<option value="true">Присутствовал</option>
+<option value="false">Отсутствовал</option>
+</select>
+<button onclick="markAttendance()">Сохранить</button>
+</section>
+
+<section>
+<h2>Отчёт по посещаемости</h2>
+<input id="start" type="date">
+<input id="end" type="date">
+<button onclick="getReport()">Сформировать</button>
+<pre id="report"></pre>
+</section>
+
+<script>
+let credentials = "";
+
+function value(id) {
+    return document.getElementById(id).value;
+}
+
+function output(id, data) {
+    document.getElementById(id).textContent =
+        JSON.stringify(data, null, 2);
+}
+
+async function api(path, method = "GET", body = null) {
+    const response = await fetch(path, {
+        method: method,
+        headers: {
+            "Authorization": "Basic " + credentials,
+            "Content-Type": "application/json"
+        },
+        body: body ? JSON.stringify(body) : null
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw Error(JSON.stringify(data));
+    }
+    return data;
+}
+
+async function load() {
+    credentials = btoa(unescape(encodeURIComponent(
+        value("username") + ":" + value("password")
+    )));
+    try {
+        output("deputies", await api("/api/deputies"));
+        output("commissions", await api("/api/commissions"));
+        output("meetings", await api("/api/meetings"));
+        document.getElementById("message").textContent =
+            "Подключение работает";
+    } catch (e) {
+        alert(e.message);
+    }
+}
+
+async function send(path, body, method = "POST") {
+    try {
+        await api(path, method, body);
+        await load();
+    } catch (e) {
+        alert(e.message);
+    }
+}
+
+function addDeputy() {
+    send("/api/deputies", {
+        name: value("deputy_name"),
+        district: value("district")
+    });
+}
+
+function addCommission() {
+    send("/api/commissions", {
+        name: value("commission_name")
+    });
+}
+
+function addMember() {
+    send("/api/commissions/" + value("commission_id") + "/members", {
+        deputy_id: Number(value("member_id"))
+    });
+}
+
+function setChair() {
+    send("/api/commissions/" + value("commission_id") + "/chair", {
+        deputy_id: Number(value("member_id"))
+    }, "PATCH");
+}
+
+function addMeeting() {
+    send("/api/meetings", {
+        commission_id: Number(value("meeting_commission")),
+        held_on: value("meeting_date"),
+        topic: value("meeting_topic")
+    });
+}
+
+function markAttendance() {
+    send("/api/meetings/" + value("meeting_id") + "/attendance", {
+        deputy_id: Number(value("attendee_id")),
+        present: value("present") === "true"
+    });
+}
+
+async function getReport() {
+    try {
+        output("report", await api(
+            "/api/report?start=" + value("start") +
+            "&end=" + value("end")
+        ));
+    } catch (e) {
+        alert(e.message);
+    }
+}
+</script>
+</body>
+</html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTML
+PYTHON_APP
+
+echo "[4/6] Установка Python-зависимостей..."
+
+python3 -m py_compile /opt/gorod-duma/main.py
+python3 -m venv /opt/gorod-duma/venv
+
+/opt/gorod-duma/venv/bin/pip install \
+    'fastapi>=0.115,<1' \
+    'uvicorn>=0.30,<1' \
+    'psycopg[binary]>=3.2,<4'
+
+echo "[5/6] Настройка авторизации..."
+
+SALT=$(openssl rand -hex 16)
+
+HASH=$(printf "%s" "$ADMIN_PASS" | python3 -c '
+import hashlib, sys
+salt = bytes.fromhex(sys.argv[1])
+password = sys.stdin.buffer.read()
+print(hashlib.pbkdf2_hmac(
+    "sha256", password, salt, 260000
+).hex())
+' "$SALT")
+
+umask 027
+
+cat > /etc/gorod-duma.env <<EOF
+DB_HOST=$DB_HOST
+DB_PASSWORD=$DB_PASS
+ADMIN_SALT=$SALT
+ADMIN_HASH=$HASH
+EOF
+
+chown root:dumaapp /etc/gorod-duma.env
+chmod 640 /etc/gorod-duma.env
+
+chown -R root:root /opt/gorod-duma
+chmod 755 /opt/gorod-duma
+
+echo "[6/6] Настройка systemd..."
+
+cat > /etc/systemd/system/gorod-duma.service <<'SYSTEMD_UNIT'
+[Unit]
+Description=Gorod Duma FastAPI Application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dumaapp
+Group=dumaapp
+WorkingDirectory=/opt/gorod-duma
+EnvironmentFile=/etc/gorod-duma.env
+ExecStart=/opt/gorod-duma/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_UNIT
+
+unset DB_PASS ADMIN_PASS
+
+systemctl daemon-reload
+systemctl enable gorod-duma
+systemctl restart gorod-duma
+
+sleep 3
+
+echo "Проверка службы..."
+systemctl --no-pager status gorod-duma || true
+
+echo "Проверка API..."
+curl -fsS http://127.0.0.1:8000/healthz
+
+echo
+echo "======================================"
+echo "Установка завершена"
+echo "Приложение: http://192.168.56.10:8000"
+echo "API Docs:    http://192.168.56.10:8000/docs"
+echo "Логин:       admin"
+echo "======================================"
+# END_OF_GOROD_DUMA_APP_SCRIPT
